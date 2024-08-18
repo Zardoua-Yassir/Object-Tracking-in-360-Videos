@@ -39,7 +39,7 @@ class TrackerHead360:
         self.srch_x_vals, self.srch_y_vals = self.x_grid[0, :], self.y_grid[:, 0]
         self.lambda_d = lambda_d  # balance weight (see equation 9), set as in original paper
         self.k_pen = k_pen  # tracking penalty
-        self.model = SiamCarV1(mode='track')  # Instantiate the tracking model and set it to tracking mode
+        self.model = SiamCarV1(mode='track_2d')  # Instantiate the tracking model and set it to tracking mode
         if os.path.exists(model_path):
             checkpoint = torch.load(model_path)
             self.model.load_state_dict(checkpoint['model'])  # Load the trained model
@@ -74,22 +74,31 @@ class TrackerHead360:
             prediction[key] = prediction[key].squeeze(0)
         return prediction
 
-    def track_360(self, video_path, start_idx=0, save_video=True, ar_tag='ar_tag', end_idx=None, viewport_size=1500,
-                  pol_smooth_thr=3, bbox_smooth_thr=1, thr_factor=[7, 4], dst_dir=None, adapt_fov=False):
+    def track_360(self, video_path, start_idx=0, save_video=True, ar_tag='', end_idx=None, viewport_size=1500,
+                  smooth_bbox=True, bbox_smooth_thr=1, bbox_thr_factor=[7, 4], dst_dir=None,
+                  adapt_fov=False, smooth_fov=True, fov_max_chg=3):
         """
+
+        Threshold value to limit changes in bounding box coordinates.
+
         Implements the tracking loop in a 360-degree video using SiamCAR predictions.
         :param video_path: Path to the input 360-degree video file.
         :param start_idx: Index of the initial frame to start tracking from.
         :param save_video: Boolean flag indicating whether to save the output video.
-        :param ar_tag: Augmented reality tag to be used in the tracking.
+        :param ar_tag: Augmented reality tag (text) to overlay on the viewport center. This text is backprojected on the
+                       original 360° video. Ignored if left empty string ''.
         :param end_idx: Index of the frame to stop tracking.
         :param viewport_size: width and height of the projected viewport window centering the target
-        :param pol_smooth_thr: smoothing threshold applied on polar coordinates (phi, theta) of the next projection
-        :param bbox_smooth_thr:  smoothing threshold applied on bbox coordinates (phi, theta) of the next projection,
-                                 multiplied by thr_factor[0] and thr_factor[1] to get center threshold and width and
-                                 height threshold, respectively.
+        :param smooth_bbox: enables smooth track if True (default). The smoothing
+        :param bbox_smooth_thr:  smoothing threshold applied on bbox center and size (i.e. with and height) during the
+                                 next projection, multiplied by thr_factor[0] and thr_factor[1] to get center threshold
+                                 and width and height threshold, respectively.
+        :param bbox_thr_factor: Optional list of factors to multiply the threshold for (cen_x, cen_y) and (w, h)
+                                respectively. Default is [7, 4].
         :param dst_dir: video output directory. Defaults to 'results'
         :param adapt_fov: if True, the next viewport is projected using dynamic fov computed from the previous bbox
+        :param smooth_fov: enables, if True, the fov smoothing by clipping values with changes higher than fov_max_chg.
+        :param fov_max_chg: max change allowed for the new fov. Discarded if smooth_fov = False.
         :return: None
         """
         self.ar_tag = ar_tag
@@ -130,14 +139,13 @@ class TrackerHead360:
         ]
         self.process = subprocess.Popen(self.ffmpeg_command, stdin=subprocess.PIPE)
 
-        self.initialize_tracker(self.video_path, self.frame_idx)
+        self.init_tracker_360(self.video_path, self.frame_idx)
         self.high_res_renderer = ViewPortRenderer(self.equi_frame, viewport_size, viewport_size)
         self.srch_org_size = self.track_helper.renderer.Wvp
         self.srch_scale_factor = self.srch_org_size / self.track_helper.srch_size
         self.save_video = save_video
         if self.save_video:
-            self.create_video_writer()
-
+            self.create_video_writer(file_prefix="viewport_", viewport_mode=True)
         self.track_result_winname = "Tracking Viewport"
         cv2.namedWindow(self.track_result_winname)
 
@@ -156,19 +164,19 @@ class TrackerHead360:
                 self.dynamic_view = self.track_helper.get_dynamic_projection(self.bbox_mn,
                                                                              show=False,
                                                                              fov=self.dynamic_fov,
-                                                                             prv_dynamic_view=None, # self.dynamic_view
-                                                                             thr=pol_smooth_thr)  # self.dynamic_view,
+                                                                             fov_max_chg=fov_max_chg,
+                                                                             smooth_fov=smooth_fov)  # self.dynamic_view,
                 # none will not apply a change limiter
             else:
                 self.dynamic_view = self.track_helper.get_dynamic_projection(self.bbox_mn,
                                                                              show=False,
                                                                              fov=self.initial_fov,
-                                                                             prv_dynamic_view=None,  # self.dynamic_view
-                                                                             thr=pol_smooth_thr)  # self.dynamic_view,
+                                                                             fov_max_chg=fov_max_chg,
+                                                                             smooth_fov=smooth_fov)  # self.dynamic_view,
                 # none will not apply a change limiter
 
-            self.siamcar_inputs = self.track_helper.get_siam_car_input(self.dynamic_view['viewport'],
-                                                                       choice="srch_window")
+            self.siamcar_inputs = self.track_helper.get_siamcar_inputs_360(self.dynamic_view['viewport'],
+                                                                           choice="srch_window")
 
             self.cur_pred = self.compute_siamcar_prediction(x=self.siamcar_inputs['srch_tensor'],
                                                             z=None)  # z=None: temp branch is pre-computed
@@ -184,12 +192,12 @@ class TrackerHead360:
             # get target_xy_loc_frame : location on the frame
             self.coarse_bbox = self.get_coarse_bbox(self.target_xy_cen_srch, self.cur_pred)
             # modify the fine bbox such that it is represented within projected image (m,n) coordinate
-            self.bbox_mn = self.get_bbox_mn(self.coarse_bbox, self.cur_pred, self.bbox_mn, limit=True,
-                                            thr=bbox_smooth_thr, thr_factor=thr_factor)
+            self.bbox_mn = self.get_bbox_mn(self.coarse_bbox, self.cur_pred, self.bbox_mn, smooth=smooth_bbox,
+                                            thr=bbox_smooth_thr, thr_factor=bbox_thr_factor)
             # Draw the fine_bbox on the current search image
-            self.viewport_and_bbox = self.track_helper.draw_bbox(image=self.dynamic_view['viewport'],
-                                                                 bbox=self.bbox_mn,
-                                                                 show=False)
+            self.viewport_and_bbox = self.track_helper.overlay_bbox(image=self.dynamic_view['viewport'],
+                                                                    bbox=self.bbox_mn,
+                                                                    show=False)
             # Update previous prediction with the current one
             self.prv_pred = self.cur_pred
 
@@ -200,7 +208,8 @@ class TrackerHead360:
             self.high_res_viewport = self.high_res_renderer.render_viewport(fov=self.initial_fov,
                                                                             theta_c=-self.dynamic_view['theta'],
                                                                             phi_c=self.dynamic_view['phi'])
-            # self.high_res_viewport = self.high_res_renderer.add_centered_text(self.ar_tag, self.high_res_viewport)
+            if self.ar_tag:
+                self.high_res_viewport = self.high_res_renderer.add_centered_text(self.ar_tag, self.high_res_viewport)
             self.high_res_bbox = self.track_helper.interpolate_bbox_to_higher_resolution(bbox=self.bbox_mn,
                                                                                          original_dims=(
                                                                                          self.track_helper.renderer.Wvp,
@@ -209,10 +218,10 @@ class TrackerHead360:
                                                                                          target_dims=(
                                                                                          self.high_res_renderer.Wvp,
                                                                                          self.high_res_renderer.Wvp))
-            self.high_res_viewport = self.track_helper.draw_bbox(image=self.high_res_viewport,
-                                                                 bbox=self.high_res_bbox,
-                                                                 show=False,
-                                                                 thickness=12)
+            self.high_res_viewport = self.track_helper.overlay_bbox(image=self.high_res_viewport,
+                                                                    bbox=self.high_res_bbox,
+                                                                    show=False,
+                                                                    thickness=12)
             self.equi_img_tag = self.high_res_renderer.remap_viewport_to_equirectangular(self.high_res_viewport)
 
             self.process.stdin.write(self.equi_img_tag.tobytes())
@@ -226,12 +235,77 @@ class TrackerHead360:
         self.process.stdin.close()
         self.process.wait()
 
-    def create_video_writer(self, out_file="output_video"):
+
+    def track_2d(self, video_path, frame_idx=0, save_video=True, dst_dir=None):
+        """
+        Coarse to fine tracking
+        :return:
+        """
+        self.dst_dir = dst_dir
+        if self.dst_dir is None:
+            self.dst_dir = os.path.join(os.getcwd(), "results")
+        self.frame_idx = frame_idx
+        self.video_path = video_path
+        self.init_tracker_2d(self.video_path)
+        self.srch_scale_factor = self.track_helper.srch_org_size / self.track_helper.srch_size
+
+        self.save_video = save_video
+        if self.save_video:
+            self.create_video_writer(file_prefix="2dTrk_", viewport_mode=False)
+        self.prv_frame = self.frame  # update previous frame
+
+        while True:  # tracking loop
+            self.ret, self.frame = self.cap.read()  # get a frame
+            if not self.ret:
+                break  # Break if no more frames
+            # Use the fine_bbox position from the previous frame to extract the search image from the current frame
+            self.srch_tnsr, _ = self.track_helper.crop_window(self.frame, self.fine_bbox, "srch_window")
+            # Use the search frame to get predictions. Use the current and previous ltrb to predict p_ij penalty map
+            self.cur_pred = self.compute_siamcar_prediction(x=self.srch_tnsr,
+                                                            z=None)  # z=None: temp branch is pre-computed
+            # Compute equation 9 to get coarse location (i,j), then get corresponding (x, y, w, h)
+            self.penalty_ij = self.track_helper.compute_penalty_ij(cur_pred=self.cur_pred, prv_pred=self.prv_pred,
+                                                                   k_pen=self.k_pen)
+
+            self.target_xy_cen_srch = self.coarse_localizer(lambda_d=self.lambda_d, cls_ij=self.cur_pred['cls'],
+                                                            penalty_ij=self.penalty_ij, cen_ij=self.cur_pred['cen'],
+                                                            cos_window_ij=self.cos_window_ij)
+            # get target_xy_loc_frame : location on the frame
+            self.coarse_bbox = self.get_coarse_bbox(self.target_xy_cen_srch, self.cur_pred)
+            self.fine_bbox = self.get_fine_bbox(self.coarse_bbox, self.cur_pred)
+
+            # Draw the fine_bbox on the current search image
+
+            # Update previous prediction with the current one
+            self.prv_pred = self.cur_pred
+            # Use
+            # To get the next search image (from the next frame), you must figure out the fine_bbox center on the original frame,
+            # not the search frame.
+            cv2.rectangle(self.frame, (self.fine_bbox[0] - self.fine_bbox[2] // 2, self.fine_bbox[1] - self.fine_bbox[3] // 2),
+                          (self.fine_bbox[0] + self.fine_bbox[2] // 2, self.fine_bbox[1] + self.fine_bbox[3] // 2), (0, 255, 0), 2)
+
+            cv2.imshow('Frame', self.frame)
+            self.video_writer.write(self.frame)
+            # Wait for the specified amount of time to achieve the desired frame rate
+            if cv2.waitKey(int(1000 / 30)) & 0xFF == ord('q'):
+                break
+        self.cap.release()
+        self.video_writer.release()
+
+        cv2.destroyAllWindows()
+
+
+    def create_video_writer(self, file_prefix='viewport', viewport_mode=True, fps=25):
         self.fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # Define the codec (H264)
-        self.video_out_file = 'viewport_result_' + os.path.basename(self.video_path)
+        self.video_out_file = file_prefix + os.path.basename(self.video_path)
         self.video_out_file = os.path.join(self.dst_dir, self.video_out_file)
-        self.video_writer = cv2.VideoWriter(self.video_out_file, self.fourcc, 25, (int(self.srch_org_size),
-                                                                                   int(self.srch_org_size)))
+
+        if viewport_mode:
+            frm_sz = (int(self.srch_org_size), int(self.srch_org_size))
+        else:
+            frm_sz = (int(self.frm_width), int(self.frm_height))
+
+        self.video_writer = cv2.VideoWriter(self.video_out_file, self.fourcc, fps, frm_sz)
 
     def get_fine_bbox(self, coarse_bbox, prediction):
         # .unsqueeze(0) adds a batch dimension for the interpolation API to work (expected input shape: batch_size,
@@ -267,7 +341,7 @@ class TrackerHead360:
         self.fine_bbox = [int(self.x0), int(self.y0), int(self.width), int(self.height)]
         return self.fine_bbox
 
-    def get_bbox_mn(self, coarse_bbox, prediction, prv_bbox_mn, limit=True, thr=1, thr_factor=None):
+    def get_bbox_mn(self, coarse_bbox, prediction, prv_bbox_mn, smooth=True, thr=1, thr_factor=None):
         # .unsqueeze(0) adds a batch dimension for the interpolation API to work (expected input shape: batch_size,
         # channels, height, width)
         cen_ab = torch.nn.functional.interpolate(prediction['cen'].unsqueeze(0), size=(255, 255), mode='bicubic')
@@ -297,7 +371,7 @@ class TrackerHead360:
 
         self.u0, self.v0 = self.a0 * self.srch_scale_factor, self.b0 * self.srch_scale_factor
 
-        if limit:
+        if smooth:
             self.bbox_mn = self.limit_bbox_change(prv_bbox_mn, [self.u0, self.v0, self.width, self.height],
                                                   thr=thr, thr_factor=thr_factor)
         else:
@@ -305,7 +379,7 @@ class TrackerHead360:
                             int(self.height)]  # x_cen, y_cen, width, height
         return self.bbox_mn
 
-    def limit_bbox_change(self, prv_bbox, cur_bbox, thr, thr_factor=[3, 1.5]):
+    def limit_bbox_change(self, prv_bbox, cur_bbox, thr, thr_factor=[7, 4]):
         """
         Limit the change in bounding box coordinates between frames. This method constrains the amount of change allowed
         in the bounding box coordinates from the previous frame to the current frame to prevent large, abrupt changes
@@ -315,7 +389,7 @@ class TrackerHead360:
         :param cur_bbox: List of bounding box coordinates from the current frame [cen_x, cen_y, w, h].
         :param thr: Threshold value to limit changes in bounding box coordinates.
         :param thr_factor: Optional list of factors to multiply the threshold for (cen_x, cen_y) and (w, h) respectively.
-                           Default is [3, 1.5].
+                           Default is [7, 4].
 
         :return: List of bounding box coordinates after applying the change limit [cen_x, cen_y, w, h].
         """
@@ -399,7 +473,7 @@ class TrackerHead360:
 
         return frame
 
-    def initialize_tracker(self, video_path, idx):
+    def init_tracker_360(self, video_path, idx):
         """
         Initialize the tracker with the specified video frame and setup necessary components.
 
@@ -424,7 +498,7 @@ class TrackerHead360:
         # recenter the first bbox and adapt the fov for search region compatiblity
         self.dynamic_view = self.track_helper.get_dynamic_projection(self.bbox_mn)
         # use the adapted view to get the inputs: downscaled search and template images
-        self.siamcar_inputs = self.track_helper.get_siam_car_input(self.dynamic_view['viewport'], choice=None)
+        self.siamcar_inputs = self.track_helper.get_siamcar_inputs_360(self.dynamic_view['viewport'], choice=None)
         # initialize the fov
         self.initial_fov = self.dynamic_view['fov']
         # pre-compute the template branch (offline tracking)
@@ -443,3 +517,42 @@ class TrackerHead360:
         self.bbox_ab = self.track_helper.adapt_bbox(self.bbox_mn, original_size=(self.Hvp, self.Wvp),
                                                     new_size=(cfg.TRACK.INSTANCE_SIZE, cfg.TRACK.INSTANCE_SIZE))
         print("The tracker has been initialized")
+
+
+    def init_tracker_2d(self, video_path):
+        """
+        Makes the following initializations:
+        1) draw and save the initial manual fine_bbox
+        2) extract the search and template image
+        2) initialize the template branch
+        """
+        self.fine_bbox = self.initialize_bbox(video_path=video_path)
+        self.track_helper.get_org_crop_size()  # required before
+        self.srch_tnsr, _ = self.track_helper.crop_window(self.frame, self.fine_bbox, 'srch_window')
+        self.temp_tnsr, _ = self.track_helper.crop_window(self.frame, self.fine_bbox, 'temp_window')
+        self.model.initialize_temp_branch(z=self.temp_tnsr)
+        self.prv_pred = self.compute_siamcar_prediction(x=self.srch_tnsr, z=self.temp_tnsr)
+        print("Tracker has been initialized: fine_bbox, template, search, first predictions\n--")
+
+
+    def initialize_bbox(self, video_path):
+        """
+        Initializes the fine_bbox self.fine_bbox = [center_x, center_y, width, height]
+        :param video_path:
+        :return:
+        """
+        self.cap = cv2.VideoCapture(video_path)
+        if not self.cap.isOpened():
+            print("Error: Unable to open video file.")
+            return
+        # Get size of the video frames
+        self.frm_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        self.frm_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+        # Create a black image with the same shape
+        self.black_image = np.zeros((self.frm_height, self.frm_width, 3), dtype=np.uint8)
+        self.frame = self.black_image  # initialize the current frame to a black image
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, self.frame_idx)
+        self.ret, self.frame = self.cap.read()  # get the first frame
+        bbox = self.track_helper.user_draw_bbox(self.frame)
+        return bbox

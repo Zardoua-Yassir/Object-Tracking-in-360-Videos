@@ -71,7 +71,7 @@ class Augmentation:
         Added by Zardoua
         Args:
             image: image as 511x511 within which various search regions will be taken
-            bbox: box of the target to track
+            bbox: box of the target to track_2d
             crop_bbox: box of the search region
             size:
 

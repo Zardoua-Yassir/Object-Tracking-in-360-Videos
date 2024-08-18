@@ -155,7 +155,7 @@ class TrackHelper:
         self.bbox_mn = self.user_draw_bbox(self.img_mn, winname="draw bbox 1/2")
         return self.bbox_mn
 
-    def get_dynamic_projection(self, bbox_mn, show=False, fov=None, prv_dynamic_view=None, thr=3):
+    def get_dynamic_projection(self, bbox_mn, show=False, fov=None, fov_max_chg=3, smooth_fov=True):
         """
         Computes the dynamic projection of the bounding box onto the spherical viewport, adjusting the field of view
         (FOV) and orientation (phi, theta)
@@ -173,7 +173,7 @@ class TrackHelper:
         :param show: Boolean flag to indicate whether to display the rendered viewport.
         :param fov: Field of view specified by the user; if provided, it overrides the computed FOV.
         :param prv_dynamic_view: Previous dynamic view parameters used to limit the change in FOV, phi, and theta.
-        :param thr: Threshold value for limiting the change in FOV, phi, and theta.
+        :param fov_max_chg: Threshold value for limiting the change in FOV, phi, and theta.
         :return: A dictionary containing the rendered viewport ('viewport'), dynamic phi ('phi'), dynamic theta
         ('theta'), and dynamic FOV ('fov').
         """
@@ -186,11 +186,11 @@ class TrackHelper:
         # convert bbox center to phi,theta
         self.dynamic_phi, self.dynamic_theta = self.mn_to_phit_heta(self.bbox_cen_m, self.bbox_cen_n)
         print(f"Current phi: {self.dynamic_phi}, Current theta {self.dynamic_theta}, Current fov {fov}")
-        if prv_dynamic_view is not None:
-            self.dynamic_phi = self.change_limiter(cur_val=self.dynamic_phi, prv_val=prv_dynamic_view['phi'], thr=thr)
-            self.dynamic_theta = self.change_limiter(cur_val=self.dynamic_theta, prv_val=prv_dynamic_view['theta'],
-                                                     thr=thr)
-            print(f"Limited phi: {self.dynamic_phi}, Limited theta {self.dynamic_theta}")
+        # if prv_dynamic_view is not None and smooth:
+        #     self.dynamic_phi = self.change_limiter(cur_val=self.dynamic_phi, prv_val=prv_dynamic_view['phi'], thr=thr)
+        #     self.dynamic_theta = self.change_limiter(cur_val=self.dynamic_theta, prv_val=prv_dynamic_view['theta'],
+        #                                              thr=thr)
+        #     print(f"Limited phi: {self.dynamic_phi}, Limited theta {self.dynamic_theta}")
 
         if fov is not None:
             fov = self.change_limiter(cur_val=self.dynamic_fov, prv_val=fov, thr=1)
@@ -294,24 +294,21 @@ class TrackHelper:
 
         self.crop_x_min_shf = int(math.floor(self.bbox_cen_x_shf - self.half_org_size))
         self.crop_y_min_shf = int(math.floor(self.bbox_cen_y_shf - self.half_org_size))
-        self.crop_x_max_shf = int(self.crop_x_min_shf + self.crop_org_size)
         self.crop_y_max_shf = int(self.crop_y_min_shf + self.crop_org_size)
+        self.crop_x_max_shf = int(self.crop_x_min_shf + self.crop_org_size)
 
         self.crop_org = self.frm_padded[self.crop_y_min_shf:self.crop_y_max_shf,
                         self.crop_x_min_shf:self.crop_x_max_shf,
                         :]
         self.window = cv2.resize(self.crop_org, (self.crop_size, self.crop_size))
 
-        cv2.imwrite(self.choice + "PaddedFrame.jpg", self.frm_padded)
-        cv2.imwrite(self.choice + "CropOrg.jpg", self.crop_org)
-        cv2.imwrite(self.choice + "CropRes.jpg", self.window)
         self.window_as_tensor = torch.from_numpy(self.window.astype(np.float32))
         # org is 0: H, 1: W, 2:Ch, we want Ch, H, W
         self.window_as_tensor = self.window_as_tensor.permute(2, 0, 1)  # Ch:2, H: 0, W: 1
         self.window_as_tensor = self.window_as_tensor.unsqueeze(0)  # add a batch dimension as the first dim
         return self.window_as_tensor, self.window
 
-    def get_siam_car_input(self, viewport, choice=None):
+    def get_siamcar_inputs_360(self, viewport, choice=None):
         """
         Gets the projected input images (srch_window and/or temp_window) for SiamCAR.
         :param choice: possible options are "srch_window" or "temp_window". If None, both srch_window and temp_window
@@ -416,12 +413,12 @@ class TrackHelper:
         Use the initialized fine_bbox to compute the srch_window and temp_window window size on the original equi_frame size
         :return:
         """
-        temp_org_w = self.bbox_mn_w + self.context_amount * (self.bbox_mn_w + self.bbox_mn_h)
-        temp_org_h = self.bbox_mn_h + self.context_amount * (self.bbox_mn_w + self.bbox_mn_h)
+        temp_org_w = self.bbox_w + self.context_amount * (self.bbox_w + self.bbox_h)
+        temp_org_h = self.bbox_h + self.context_amount * (self.bbox_w + self.bbox_h)
         self.temp_org_size = round(math.sqrt(temp_org_w * temp_org_h))
-        self.srch_org_size = self.temp_org_size * (self.srch_size / self.temp_size)
+        self.srch_org_size = self.temp_org_size * (self.srch_size/self.temp_size)
 
-    def draw_bbox(self, image, bbox, winname="FRAME", upscale_factor=None, show=True, thickness=4):
+    def overlay_bbox(self, image, bbox, winname="FRAME", upscale_factor=None, show=True, thickness=4):
         # Extract center coordinates and dimensions
         cen_x, cen_y, width, height = bbox
 
@@ -441,7 +438,6 @@ class TrackHelper:
             cv2.imshow(winname, image)
             cv2.waitKey(0)
             cv2.destroyWindow(winname)
-            # cv2.destroyAllWindows()
         return image
 
     def post_process_logits(self, prediction):

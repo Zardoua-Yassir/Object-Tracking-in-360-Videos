@@ -186,7 +186,7 @@ class ViewPortRenderer:
         # Define the font, scale, and color
         font = cv2.FONT_HERSHEY_SIMPLEX
         font_scale = 9   # Adjust the scale as needed
-        font_color = (0, 255, 255)  # Red color in BGR
+        font_color = (0, 255, 0)  # Red color in BGR
         font_thickness = 9
 
         # Get the size of the text

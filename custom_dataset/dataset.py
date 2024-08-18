@@ -66,14 +66,14 @@ class SubDataset(object):
             # {'person-2': {'00': {'000000': [573, 336, 620, 515],
             #                       .....
             #                     {'000019': [576, 334, 625, 516]}}}
-            # NOTE: '00' here represents a track
+            # NOTE: '00' here represents a track_2d
             print("Json meta_data loaded")
 
         for video in list(meta_data.keys()):  # a list of video names (e.g., person-1, person-2, ...)
             for track in meta_data[video]:
                 frames = meta_data[video][track]
                 frames = list(map(int, filter(lambda x: x.isdigit(), frames.keys())))  # a list of frame indexes as INT
-                # within the current track (e.g., "00"), which is itself within a video (e.g., "person-1")
+                # within the current track_2d (e.g., "00"), which is itself within a video (e.g., "person-1")
                 frames.sort()  # sort the list from smallest to biggest index value
                 if self.frames_subset > 0:
                     frames = frames[0:self.frames_subset]
@@ -159,15 +159,15 @@ class SubDataset(object):
         """
         video_name = self.videos[index]
         video = self.labels[video_name]
-        track = np.random.choice(list(video.keys()))  # randomly choose a track
+        track = np.random.choice(list(video.keys()))  # randomly choose a track_2d
         track_info = video[track]  # get GT b.boxes of all consecutive frames of the selected video
 
         frames = track_info['frames']
-        template_frame = np.random.randint(0, len(frames))  # pick up a random frame from the selected track to extract
+        template_frame = np.random.randint(0, len(frames))  # pick up a random frame from the selected track_2d to extract
         # template
         left = max(template_frame - self.frame_range, 0)  # the max ensures not to select a negative frame index
         right = min(template_frame + self.frame_range, len(frames) - 1) + 1  # the min ensures not to select an index
-        # bigger than the last frame index of the selected track
+        # bigger than the last frame index of the selected track_2d
         search_range = frames[left:right]
         template_frame = frames[template_frame]
         search_frame = np.random.choice(search_range)

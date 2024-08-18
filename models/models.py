@@ -84,8 +84,8 @@ class SiameseSubnet(torch.nn.Module):
         """
         :param m: number of channels in R* (See Figure 2)
         """
-        if mode not in ['train', 'track']:
-            raise ValueError("'mode' must be either 'train' or 'track'")
+        if mode not in ['train', 'track_2d']:
+            raise ValueError("'mode' must be either 'train' or 'track_2d'")
         self.mode = mode
         super(SiameseSubnet, self).__init__()
         self.r_star = None
@@ -110,7 +110,7 @@ class SiameseSubnet(torch.nn.Module):
         return self.r_star
 
     def initialize_temp_branch(self, z):
-        if self.mode == 'track':
+        if self.mode == 'track_2d':
             self.phi_z = self.resnet_siam_subnet(z)
             self.phi_z_h, self.phi_w = self.phi_z.shape[2], self.phi_z.shape[3]
             # cropping the center 7 × 7 regions as the temp_window feature to speed-up the correlation module
@@ -121,7 +121,7 @@ class SiameseSubnet(torch.nn.Module):
             print("Value = ", self.phi_z)
             print("--")
         else:
-            raise ValueError("'mode' attribute must be set to 'track'")
+            raise ValueError("'mode' attribute must be set to 'track_2d'")
 
 
 class CarSubnet(torch.nn.Module):
@@ -194,8 +194,8 @@ class CarSubnet(torch.nn.Module):
 
 class SiamCarV1(torch.nn.Module):
     def __init__(self, mode='train'):
-        if mode not in ['train', 'track']:
-            raise ValueError("'mode' must be either 'train' or 'track'")
+        if mode not in ['train', 'track_2d']:
+            raise ValueError("'mode' must be either 'train' or 'track_2d'")
         self.mode = mode
         super(SiamCarV1, self).__init__()
         self.siam_subnet = SiameseSubnet(mode=self.mode)
@@ -211,7 +211,7 @@ class SiamCarV1(torch.nn.Module):
         """
         if self.mode == 'train':
             self.r_star = self.siam_subnet(x, z)
-        elif self.mode == 'track':
+        elif self.mode == 'track_2d':
             self.r_star = self.siam_subnet(x)
 
         self.cls_pred, self.cen_pred, self.loc_pred = self.car_subnet(self.r_star)
